@@ -5,11 +5,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import (
-    WebDriverException, TimeoutException,
-    ElementNotInteractableException, StaleElementReferenceException,
-    ElementClickInterceptedException,
-)
+from selenium.common.exceptions import WebDriverException, TimeoutException, ElementNotInteractableException, StaleElementReferenceException, ElementClickInterceptedException
 from selenium.webdriver.common.action_chains import ActionChains
 import pyotp
 import threading
@@ -31,25 +27,23 @@ ExceptionType = Union[Type[BaseException], Tuple[Type[BaseException], ...]]
 
 logger = get_logger('extract_data', config.paths['log_dir'])
 
-
 class SeleniumExtract(ABC):
     def __init__(self):
-        """Initializes shared WebDriver settings used by all PMS extractor subclasses."""
-        self.waittime       = 60
-        self.check_interval = 5   # seconds between polling retries
-        self.max_retries    = 3
+        """Initializes the base setting."""
+        self.waittime = 60
+        self.check_interval = 5 # wait time to check/retry again
+        self.max_retries = 3
 
     @staticmethod
     def retry(exceptions: ExceptionType, tries: int = 10, delay: int = 2, backoff: int = 2):
         """
-        Decorator that retries the wrapped function on specified exceptions.
-        On each retry it attempts to refresh the page (if a WebDriver is available)
-        and applies exponential back-off to reduce flakiness from transient UI states.
+        A decorator function that automatically retries execution of the wrapped function
+        when one of the specified exceptions is raised.
         """
         def decorator_retry(func: Callable) -> Callable:
             @functools.wraps(func)
             def wrapper_retry(*args: Any, **kwargs: Any) -> Any:
-                _tries, _delay = tries, delay
+                _tries, _delay = tries , delay
 
                 while _tries > 1:
                     try:
@@ -58,23 +52,23 @@ class SeleniumExtract(ABC):
                     except exceptions as e:
                         logger.warning(f"Retry Loop: {func.__name__} failed with {type(e).__name__}. Retrying in {_delay}s...")
 
-                        # --- Locate the WebDriver instance to refresh the page ---
-                        # 1. Check keyword arguments first
+                        # --- Find the Driver to Refresh ---
+                        # 1. Check if 'driver' was passed as a keyword argument
                         driver = kwargs.get('driver')
 
-                        # 2. Fall back to positional args — look for an object with .refresh()
+                        # 2. If not, look through positional args for an object with a .refresh() method
                         if not driver:
                             for arg in args:
                                 if hasattr(arg, 'refresh'):
                                     driver = arg
                                     break
 
-                        # 3. Refresh to clear stale DOM state before next attempt
+                        # 3. If we found a driver, refresh the page
                         if driver:
                             try:
                                 logger.info(f"Decorator triggering driver.refresh() for {func.__name__}")
                                 driver.refresh()
-                                time.sleep(1)
+                                time.sleep(1) # Give the refresh a second to breathe
                             except Exception as refresh_err:
                                 logger.error(f"Could not refresh driver: {refresh_err}")
 
@@ -82,7 +76,7 @@ class SeleniumExtract(ABC):
                         _tries -= 1
                         _delay *= backoff
 
-                # Final attempt: propagate exception to caller
+                # Final attempt: if it fails here, it raises the error to the caller
                 return func(*args, **kwargs)
 
             return wrapper_retry
@@ -90,11 +84,7 @@ class SeleniumExtract(ABC):
 
     @staticmethod
     def init_driver(download_dir: Path, profile_dir: Path = None) -> WebDriver:
-        """
-        Initialises a Chrome WebDriver with a clean download directory.
-        In non-test mode the browser runs headless; a persistent profile directory
-        is used when provided so that login sessions survive across sites.
-        """
+        """Innitializes and setting a Chrome WevDriver."""
         logger.info("Initializing WebDriver")
 
         if download_dir.exists():
@@ -106,10 +96,9 @@ class SeleniumExtract(ABC):
 
         options = Options()
         if config.env_status == "test":
-            None  # Visible browser for manual inspection in test mode
-        else:
-            options.add_argument("--headless")
-        options.add_argument("--log-level=3")
+            None # Deactivate run in background to inspect the automation
+        else: options.add_argument("--headless")  # Activate run in background
+        options.add_argument("--log-level=3")   # Suppress warnings/errors
         options.add_experimental_option('excludeSwitches', ['enable-logger'])
         prefs = {"download.default_directory": str(download_dir)}
         options.add_experimental_option("prefs", prefs)
@@ -125,11 +114,13 @@ class SeleniumExtract(ABC):
 
     def _wait_for_file(self, download_dir: Path, new_name: str = None) -> bool:
         """
-        Polls the download directory until a new file appears, confirms it is
-        fully written (stable file size for 3 consecutive checks), then renames it.
-        Skips browser temp extensions (.crdownload, .part) during the wait.
+        Waits for a file download to complete in the specified directory, identifies the
+        newest downloaded file, confirms its stability (by checking file size over time)
+        to ensure the download is finished, and then renames it.
         """
         start_time = time.time()
+
+        # Capture initial state to find 'new' files only
         preexisting_files = set(p.name for p in download_dir.iterdir() if p.is_file())
         retry_count = 0
 
@@ -138,19 +129,22 @@ class SeleniumExtract(ABC):
             new_files = current_files - preexisting_files
 
             if new_files:
+                # Sort to get the most recent file
                 new_files_sorted = sorted(
                     new_files,
                     key=lambda name: (download_dir / name).stat().st_mtime,
                     reverse=True
                 )
-                latest_file      = new_files_sorted[0]
+                latest_file = new_files_sorted[0]
                 latest_file_path = download_dir / latest_file
 
+                # 1. Skip temporary browser extensions
                 if latest_file_path.suffix in (".crdownload", ".part", ".tmp"):
                     logger.info(f"File '{latest_file}' is still downloading (temp extension detected)...")
                 else:
-                    previous_size      = -1
-                    size_stable_count  = 0
+                    # 2. Wait for file size to stabilize (ensures download is complete)
+                    previous_size = -1
+                    size_stable_count = 0
 
                     while size_stable_count < 3:
                         if time.time() - start_time > self.waittime:
@@ -161,11 +155,12 @@ class SeleniumExtract(ABC):
                             size_stable_count += 1
                         else:
                             size_stable_count = 0
-                            previous_size     = current_size
+                            previous_size = current_size
 
                         logger.info(f"Stabilizing '{latest_file}': {current_size} bytes...")
-                        time.sleep(1)
+                        time.sleep(1) # Short sleep for stability check
 
+                    # 3. Handle Renaming Logic
                     if new_name:
                         new_file_path = download_dir / new_name
                         try:
@@ -184,9 +179,11 @@ class SeleniumExtract(ABC):
                             time.sleep(self.check_interval)
                             continue
                     else:
+                        # Keep original name
                         logger.info(f"Download complete. Keeping original name: {latest_file}")
                         return True
 
+            # Global Timeout Check
             if time.time() - start_time > self.waittime:
                 raise WebDriverException("File download timed out.")
 
@@ -197,29 +194,37 @@ class SeleniumExtract(ABC):
         for attempt in range(self.max_retries):
             try:
                 logger.info(f"Attempt {attempt + 1} to switch to frame {frame_id}")
+
+                # Ensure frame is present and visible
                 frame = WebDriverWait(driver, self.waittime).until(
                     EC.presence_of_element_located((By.ID, frame_id))
                 )
-                frame_location = frame.location_once_scrolled_into_view
-                driver.execute_script(f"window.scrollTo({frame_location['x']}, {frame_location['y']});")
-                time.sleep(1)
 
+                # Alternative 1: Scroll using JavaScript to specific coordinates
+                frame_location = frame.location_once_scrolled_into_view  # Get frame location
+                driver.execute_script(f"window.scrollTo({frame_location['x']}, {frame_location['y']});")
+                time.sleep(1)  # Allow time for scroll effect
+
+                # Alternative 2: Scroll the parent container if frame inside scrollable div
                 parent_scroll = driver.execute_script("return arguments[0].parentNode;", frame)
                 driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", parent_scroll)
                 time.sleep(1)
 
+                # Alternative 3: Move to element using Actions class
                 ActionChains(driver).move_to_element(frame).perform()
+
+                # Try switching to the frame after scrolling
                 WebDriverWait(driver, self.waittime).until(EC.frame_to_be_available_and_switch_to_it((By.ID, frame_id)))
                 logger.info(f"Successfully switched to frame {frame_id}")
-                return
+                return  # Exit if successful
             except (TimeoutException, ElementNotInteractableException) as e:
                 logger.warning(f"Failed to switch to frame {frame_id} on attempt {attempt + 1}: {e}")
-                time.sleep(2)
+                time.sleep(2)  # Wait before retrying
 
-        raise WebDriverException(f"Failed to switch to frame {frame_id} after {self.max_retries} attempts.")
+        raise WebDriverException(f"Failed to switch to frame {frame_id} after {self.max_retries} attempts.") # If all retries fail, raise an exception
 
     def _click_element(self, driver: WebDriver, by: str, value: str):
-        """Clicks an element after scrolling it into view; falls back to JS click on interception."""
+        """Clicks an element after scrolling it into view and waiting for it to be clickable."""
         end_time = time.time() + self.waittime
 
         while time.time() < end_time:
@@ -255,34 +260,26 @@ class SeleniumExtract(ABC):
                 time.sleep(0.5)
 
         last_exception = Exception(f"Timed out clicking element: {value}")
+
         raise last_exception
 
     def _enter_date(self, driver: WebDriver, by: str, value: str, date_str: str):
-        """Clears a date input field and types the supplied date string."""
+        """Helper to clear date field and enter date value."""
         date_field = WebDriverWait(driver, self.waittime).until(
             EC.element_to_be_clickable((by, value))
         )
         date_field.clear()
         date_field.send_keys(date_str)
 
-
-class PmsExtract(SeleniumExtract):
-    """
-    Extracts 8 report types from the on-premise PMS web portal for a single property.
-    Login uses username/password plus TOTP-based 2FA; a shared Chrome profile reuses
-    the authenticated session across sequential site requests to avoid repeated 2FA prompts.
-    """
-    # Class-level lock ensures only one thread generates a TOTP code at a time,
-    # preventing code reuse collisions when multiple sites share a 30-second window.
+class Guestline(SeleniumExtract):
     _totp_lock = threading.Lock()
 
     def __init__(self, backdate: int = 1):
         super().__init__()
-        self.backdate  = backdate
-        self.pms_user  = config.pms_credentials['pms_user']
-        self.pms_pass  = config.pms_credentials['pms_pass']
-        # Shared Chrome profile directory — persists session cookies across sites
-        self.profiles_dir = config.paths['home_dir'] / '.pms_profiles'
+        self.backdate = backdate
+        self.gl_user = config.guestline['gl_user']
+        self.gl_pass = config.guestline['gl_pass']
+        self.profiles_dir = config.paths['home_dir'] / '.guestline_profiles'
         self._token_manager = TokenManager(
             client_id=config.credentials['client_id'],
             authority=config.credentials['authority'],
@@ -300,25 +297,20 @@ class PmsExtract(SeleniumExtract):
     # --- Web automation ---
     @SeleniumExtract.retry(WebDriverException)
     def _login(self, driver: WebDriver, site_id: str):
-        """
-        Navigates to the PMS login page, submits credentials, handles TOTP 2FA if prompted,
-        then switches into the target site. Re-login is handled if the portal redirects back
-        to the credential screen after site selection.
-        """
+        """Nevigate to login page, login if needed, and entry specified site_id."""
         logger.info(f"{site_id}: Starting login process")
 
-        # Navigate to the PMS portal login page (URL sourced from environment variable)
-        driver.get(config.pms_credentials['base_url'])
+        driver.get("https://home.eu.guestline.app/")
         logger.info(f"{site_id}: Navigated to login page")
 
         driver.maximize_window()
 
         # Check if already logged in — username field won't be visible if session is active
         try:
-            WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.NAME, "username"))).send_keys(self.pms_user)
+            WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.NAME, "username"))).send_keys(self.gl_user)
             logger.info(f"{site_id}: Entered username")
 
-            driver.find_element(By.NAME, "password").send_keys(self.pms_pass)
+            driver.find_element(By.NAME, "password").send_keys(self.gl_pass)
             logger.info(f"{site_id}: Entered password")
 
             driver.find_element(By.NAME, "submit").click()
@@ -326,13 +318,12 @@ class PmsExtract(SeleniumExtract):
         except TimeoutException:
             logger.info(f"{site_id}: Session still active, skipping credential entry")
 
-        # Handle TOTP 2FA if the portal prompts for a one-time code
+        # Handle 2FA if prompted for one-time code
         try:
             totp_input = WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.ID, "code")))
             logger.info(f"{site_id}: 2FA prompt detected, waiting for TOTP lock")
 
-            with PmsExtract._totp_lock:
-                # Lock prevents concurrent threads from consuming the same 30-second TOTP window
+            with Guestline._totp_lock:
                 TOTP_SECRET = config.credentials['TOTP_SECRET']
                 totp = pyotp.TOTP(TOTP_SECRET)
                 totp_input.send_keys(totp.now())
@@ -344,7 +335,7 @@ class PmsExtract(SeleniumExtract):
                 driver.find_element(By.CSS_SELECTOR, "button[data-action-button-primary='true']").click()
                 logger.info(f"{site_id}: Clicked Continue on 2FA page")
 
-                # Wait for the current TOTP window to expire so the next site gets a fresh code
+                # Wait until current TOTP window expires so next site gets a fresh unused code
                 seconds_remaining = 30 - (int(time.time()) % 30)
                 logger.info(f"{site_id}: Waiting {seconds_remaining}s for next TOTP window")
                 time.sleep(seconds_remaining + 1)
@@ -366,8 +357,8 @@ class PmsExtract(SeleniumExtract):
 
         try:
             WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.NAME, "username")))
-            driver.find_element(By.NAME, "username").send_keys(self.pms_user)
-            driver.find_element(By.NAME, "password").send_keys(self.pms_pass)
+            driver.find_element(By.NAME, "username").send_keys(self.gl_user)
+            driver.find_element(By.NAME, "password").send_keys(self.gl_pass)
             WebDriverWait(driver, self.waittime).until(EC.element_to_be_clickable((By.XPATH, f"//span[@class='MuiButton-label' and text()='Log in to {site_id}']"))).click()
             logger.info(f"{site_id}: Re-login required, submitted credentials for site")
         except TimeoutException:
@@ -383,12 +374,7 @@ class PmsExtract(SeleniumExtract):
 
     @SeleniumExtract.retry(WebDriverException)
     def _generate_actual_report(self, driver: WebDriver, site_id: str, download_dir: Path):
-        """
-        Downloads the 'Revenue By' report as CSV.
-        Parameters: Market Segment type, Opened period date, Accommodation Items Only,
-        Bedroom revenue type. One site uses end-of-last-month as the from-date
-        due to a non-standard fiscal cut-off (controlled via backdate_site_id config).
-        """
+        """Generate actual report from downloading 'Revenue By' report as csv."""
         logger.info(f"{site_id}: Generating actual report.")
 
         driver.switch_to.default_content()
@@ -421,8 +407,7 @@ class PmsExtract(SeleniumExtract):
         logger.info(f"{site_id}: Selected 'Opened' in Period Date Type dropdown")
 
         driver.find_element(By.ID, "ctl00_InputParameters_ps_Period_winp_PeriodFromDate").clear()
-        # One property has a non-standard period start — uses end-of-last-month instead of month start
-        if site_id == config.pms_credentials['backdate_site_id']:
+        if site_id == "AROSFA":
             fromdate = config.date_str['eo_lastmonth']
         else:
             fromdate = config.date_str['this_month']
@@ -451,13 +436,18 @@ class PmsExtract(SeleniumExtract):
 
     @SeleniumExtract.retry(WebDriverException)
     def _generate_forecast_report(self, driver: WebDriver, site_id: str, download_dir: Path):
-        """Downloads the 'Revenue By Market Segment' forecast report as CSV."""
+        """Generate forecast report by downloading 'Revenue By Market Segment' report as csv."""
+
         logger.info(f"{site_id}: Generating forecast report for site")
 
         driver.switch_to.default_content()
 
         self._click_element(driver, By.CSS_SELECTOR, 'button[aria-label="Menu"]')
+        logger.info(f"{site_id}: Clicked on dropdown menu")
+
         self._click_element(driver, By.XPATH, "//span[normalize-space()='Forecast']")
+        logger.info(f"{site_id}: Clicked on forecast menu")
+
         self._click_element(driver, By.XPATH, "//span[contains(@class, 'oc-nav-MuiTypography-bodySmall') and normalize-space()='Revenue By Market Segment']")
         logger.info(f"{site_id}: Selected forecast option")
 
@@ -479,24 +469,30 @@ class PmsExtract(SeleniumExtract):
         )
         booking_type_dropdown.click()
         self._click_element(driver, By.XPATH, "//option[. = 'Bedroom']")
+        logger.info(f"{site_id}: Selected 'Bedroom' in Booking Type dropdown")
 
         self._click_element(driver, By.CSS_SELECTOR, ".inlineblock:nth-child(2)")
+        logger.info(f"{site_id}: Selected another option")
 
         show_as_dropdown = WebDriverWait(driver, self.waittime).until(
             EC.element_to_be_clickable((By.ID, "ctl00_InputParameters_winp_ShowAs"))
         )
         show_as_dropdown.click()
         self._click_element(driver, By.XPATH, "//option[. = 'Nett']")
+        logger.info(f"{site_id}: Selected 'Nett' in Show As dropdown")
 
         display_by_dropdown = WebDriverWait(driver, self.waittime).until(
             EC.element_to_be_clickable((By.ID, "ctl00_InputParameters_winp_DisplayBy"))
         )
         display_by_dropdown.click()
         self._click_element(driver, By.XPATH, "//option[. = 'Date By Market Segment']")
+        logger.info(f"{site_id}: Selected 'Date By Market Segment' in Display By dropdown")
 
         time.sleep(5)
 
         self._click_element(driver, By.CSS_SELECTOR, ".popupArrow")
+        logger.info(f"{site_id}: Clicked on popup arrow")
+
         self._click_element(driver, By.ID, "ctl00_ReportsView_wbtn_CSV")
         logger.info(f"{site_id}: Clicked on CSV download button")
 
@@ -506,76 +502,98 @@ class PmsExtract(SeleniumExtract):
 
     @SeleniumExtract.retry(WebDriverException)
     def _generate_actual_and_forecast_report(self, driver: WebDriver, site_id: str, download_dir: Path):
-        """Downloads the Actual & Forecast PDF report for 3 consecutive monthly windows."""
+        """Generate actual and forecast report by downloading Actual&Forecast as pdf (3 files)."""
         logger.info(f"{site_id}: Generating actual and forecast report for site")
 
         driver.switch_to.default_content()
 
         self._click_element(driver, By.CSS_SELECTOR, 'button[aria-label="Menu"]')
+        logger.info(f"{site_id}: Clicked on dropdown menu")
+
         self._click_element(driver, By.XPATH, "//span[text()='Revenue']")
+        logger.info(f"{site_id}: Clicked on Revenue button")
+
         self._click_element(driver, By.XPATH, "//span[contains(@class, 'oc-nav-MuiTypography-bodySmall') and normalize-space()='Actual & Forecast']")
+        logger.info(f"{site_id}: Selected actual and forecast option")
 
         WebDriverWait(driver, self.waittime).until(
             EC.invisibility_of_element_located((By.CLASS_NAME, "progress-indicator-background"))
         )
+
         WebDriverWait(driver, self.waittime).until(
             EC.frame_to_be_available_and_switch_to_it((By.ID, "MainFrame"))
         )
+        logger.info(f"{site_id}: Switched to report frame")
+
         WebDriverWait(driver, self.waittime).until(
             EC.presence_of_element_located((By.ID, "ctl00_InputParameters_winp_StartDate"))
         )
+        logger.info(f"{site_id}: Report parameters form is ready for interaction.")
 
         def enter_dates_and_select_options(from_date, to_date, report_name):
             try:
                 self._enter_date(driver, By.ID, "ctl00_InputParameters_winp_StartDate", from_date)
+                logger.info(f"{site_id}: Entered start date {from_date}")
+
                 self._enter_date(driver, By.ID, "ctl00_InputParameters_winp_EndDate", to_date)
+                logger.info(f"{site_id}: Entered end date {to_date}")
 
                 show_as_dropdown = WebDriverWait(driver, self.waittime).until(
                     EC.element_to_be_clickable((By.ID, "ctl00_InputParameters_winp_ShowAs"))
                 )
                 show_as_dropdown.click()
                 self._click_element(driver, By.XPATH, "//option[. = 'Nett']")
+                logger.info(f"{site_id}: Selected 'Nett' in ShowAs dropdown")
 
                 revenue_dropdown = WebDriverWait(driver, self.waittime).until(
                     EC.element_to_be_clickable((By.ID, "ctl00_InputParameters_winp_Revenue"))
                 )
                 revenue_dropdown.click()
                 self._click_element(driver, By.XPATH, "//option[. = 'Bedroom']")
+                logger.info(f"{site_id}: Selected 'Bedroom' in Revenue dropdown")
 
                 self._click_element(driver, By.ID, "ctl00_ReportsView_wbtn_View")
                 self._click_element(driver, By.ID, "ctl00_ReportsView_wbtn_PDF")
+                logger.info(f"{site_id}: Clicked on View and PDF buttons to download report")
+
                 self._wait_for_file(download_dir)
 
             except WebDriverException as e:
                 logger.error(f"{site_id}: Error while generating report {report_name}: {e}")
                 raise
 
-        # Download three consecutive monthly windows (this month, +1, +2)
         enter_dates_and_select_options(config.date_str['this_month'], config.date_str['next_month'], config.date_str['this_month_name'])
         enter_dates_and_select_options(config.date_str['next_month'], config.date_str['next_2_months'], config.date_str['next_month_name'])
         enter_dates_and_select_options(config.date_str['next_2_months'], config.date_str['next_3_months'], config.date_str['next_2_months_name'])
 
-        logger.info(f"{site_id}: Downloaded Actual&Forecast successfully.")
+        logger.info(f"{site_id}: Downloaded Actual&Forecast succesfully.")
 
     @SeleniumExtract.retry(WebDriverException)
     def _generate_daily_new_reservations(self, driver: WebDriver, site_id: str, download_dir: Path):
-        """Downloads the Daily New Reservations report as PDF."""
+        """Generate Daily New Reservations by downloading 'Daily New Reservation' report as pdf."""
         logger.info(f"{site_id}: Generating daily new reservations report for site.")
 
         driver.switch_to.default_content()
 
         self._click_element(driver, By.CSS_SELECTOR, 'button[aria-label="Menu"]')
+        logger.info(f"{site_id}: Clicked on dropdown menu")
+
         self._click_element(driver, By.XPATH, "//span[normalize-space()='Reservation']")
-        self._click_element(driver, By.XPATH, "//span[contains(@class, 'oc-nav-MuiTypography-bodySmall') and normalize-space()='Daily New Reservations']")
+        logger.info(f"{site_id}: Clicked on Reservation button")
+
+        self._click_element(driver,By.XPATH, "//span[contains(@class, 'oc-nav-MuiTypography-bodySmall') and normalize-space()='Daily New Reservations']")
+        logger.info(f"{site_id}: Selected daily new reservations report option")
 
         WebDriverWait(driver, self.waittime).until(
             EC.invisibility_of_element_located((By.CLASS_NAME, "progress-indicator-background"))
         )
+
         WebDriverWait(driver, self.waittime).until(
             EC.frame_to_be_available_and_switch_to_it((By.ID, "MainFrame"))
         )
+        logger.info(f"{site_id}: Switched to report frame")
 
-        today_date  = config.dates['today_date']
+        today_date = config.dates['today_date']
         backdate_str = (today_date - timedelta(days=self.backdate)).strftime('%d%m%Y')
 
         self._enter_date(driver, By.ID, "ctl00_InputParameters_winp_EndDate", config.date_str['today_date'])
@@ -586,6 +604,7 @@ class PmsExtract(SeleniumExtract):
         )
         booking_type_dropdown.click()
         self._click_element(driver, By.XPATH, "//option[. = 'Bedroom']")
+        logger.info(f"{site_id}: Selected 'Bedroom' in Booking Type dropdown")
 
         self._click_element(driver, By.CSS_SELECTOR, ".popupArrow")
         self._click_element(driver, By.ID, "ctl00_ReportsView_wbtn_PDF")
@@ -596,28 +615,38 @@ class PmsExtract(SeleniumExtract):
 
     @SeleniumExtract.retry(WebDriverException)
     def _generate_cancellation_report(self, driver: WebDriver, site_id: str, download_dir: Path):
-        """Downloads the Cancellations report as PDF."""
+        """Generate cancellation report by downloading cancellation report as pdf."""
         logger.info(f"{site_id} Generating Cancellation report for site.")
         driver.switch_to.default_content()
 
         self._click_element(driver, By.CSS_SELECTOR, 'button[aria-label="Menu"]')
+        logger.info(f"{site_id}: Clicked on dropdown menu")
+
         self._click_element(driver, By.XPATH, "//span[normalize-space()='Reservation']")
-        self._click_element(driver, By.XPATH, "//span[contains(@class, 'oc-nav-MuiTypography-bodySmall') and normalize-space()='Cancellations']")
+        logger.info(f"{site_id}: Clicked on Reservation button")
+
+        self._click_element(driver,By.XPATH, "//span[contains(@class, 'oc-nav-MuiTypography-bodySmall') and normalize-space()='Cancellations']")
+        logger.info(f"{site_id}: Selected cancellation report option")
 
         WebDriverWait(driver, self.waittime).until(
             EC.invisibility_of_element_located((By.CLASS_NAME, "progress-indicator-background"))
         )
+
         WebDriverWait(driver, self.waittime).until(
             EC.frame_to_be_available_and_switch_to_it((By.ID, "MainFrame"))
         )
+        logger.info(f"{site_id}: Switched to report frame")
 
-        today_date   = config.dates['today_date']
+        today_date = config.dates['today_date']
         backdate_str = (today_date - timedelta(days=self.backdate)).strftime('%d%m%Y')
 
         self._enter_date(driver, By.ID, "ctl00_InputParameters_winp_StartDate", backdate_str)
         self._enter_date(driver, By.ID, "ctl00_InputParameters_winp_EndDate", config.date_str['as_of_date'])
+        logger.info(f"{site_id}: Entered start and end dates")
 
-        self._click_element(driver, By.ID, "ctl00_InputParameters_rad_CancelDate")
+        self._click_element(driver,By.ID, "ctl00_InputParameters_rad_CancelDate")
+        logger.info(f"{site_id}: Selected cancel date radio button")
+
         self._click_element(driver, By.CSS_SELECTOR, ".popupArrow")
         self._click_element(driver, By.ID, "ctl00_ReportsView_wbtn_PDF")
         logger.info(f"{site_id}: Clicked on PDF download button")
@@ -627,29 +656,39 @@ class PmsExtract(SeleniumExtract):
 
     @SeleniumExtract.retry(WebDriverException)
     def _generate_eod_report(self, driver: WebDriver, site_id: str, download_dir: Path):
-        """Downloads the Period End (EOD) report as both CSV and PDF."""
+        """Generate EOD report by downloading 'Period End' as csv and pdf."""
         logger.info(f"{site_id}: Generating EOD report for site.")
 
         time.sleep(3)
         driver.switch_to.default_content()
 
         self._click_element(driver, By.CSS_SELECTOR, 'button[aria-label="Menu"]')
+        logger.info(f"{site_id}: Clicked on menu button")
+
         self._click_element(driver, By.XPATH, "//span[normalize-space()='Period End']")
+        logger.info(f"{site_id}: Clicked on Period End button")
+
         self._click_element(driver, By.XPATH, "//span[contains(@class, 'oc-nav-MuiTypography-bodySmall') and normalize-space()='Period End Archive']")
+        logger.info(f"{site_id}: Clicked on period end button using XPath")
 
         WebDriverWait(driver, self.waittime).until(
             EC.invisibility_of_element_located((By.CLASS_NAME, "progress-indicator-background"))
         )
+
         time.sleep(3)
         WebDriverWait(driver, self.waittime).until(EC.frame_to_be_available_and_switch_to_it((By.ID, "MainFrame")))
+        logger.info(f"{site_id}: Switched to report frame")
         WebDriverWait(driver, self.waittime).until(EC.visibility_of_element_located((By.ID, "winp_PeriodType")))
 
         period_dropdown = WebDriverWait(driver, self.waittime).until(EC.element_to_be_clickable((By.ID, "winp_PeriodType")))
         period_dropdown.click()
         period_dropdown.find_element(By.XPATH, "//option[. = 'End of day']").click()
+        logger.info(f"{site_id}: Selected 'End of day' in Period Type dropdown")
 
         self._click_element(driver, By.ID, "wbtn_Refresh")
+        logger.info(f"{site_id}: Clicked on Refresh button")
         time.sleep(3)
+
         WebDriverWait(driver, self.waittime).until(
             EC.invisibility_of_element_located((By.CLASS_NAME, "progress-indicator-background"))
         )
@@ -663,6 +702,7 @@ class PmsExtract(SeleniumExtract):
 
         self._click_element(driver, By.CSS_SELECTOR, "#grd_Periods_ctl02_rpt_View_wbtn_View > .popupArrow")
         self._click_element(driver, By.ID, "grd_Periods_ctl02_rpt_View_wbtn_PDF")
+        logger.info(f"{site_id}: Clicked on View and PDF buttons to download PDF")
 
         self._wait_for_file(download_dir)
         logger.info(f"{site_id}: Downloaded EOD.pdf successfully.")
@@ -670,24 +710,31 @@ class PmsExtract(SeleniumExtract):
         if self.backdate < 1:
             driver.switch_to.default_content()
         else:
-            ctlinitialvalue = 2
+            ctlinitialvalue = 2  # ctl02
             for i in range(1, self.backdate):
                 logger.info(f"Processing back date {i}")
-                ctlvalue        = ctlinitialvalue + i
+                ctlvalue = ctlinitialvalue + i
                 back_date_value = config.dates['as_of'] - timedelta(days=i)
 
                 self._click_element(driver, By.ID, "wbtn_Refresh")
+                logger.info(f"{site_id}: Clicked on Refresh button")
                 time.sleep(2)
+
                 WebDriverWait(driver, self.waittime).until(
                     EC.invisibility_of_element_located((By.CLASS_NAME, "progress-indicator-background"))
                 )
 
                 self._click_element(driver, By.ID, f"grd_Periods_ctl0{ctlvalue}_wbtn_DetailedExtract")
+                logger.info(f"{site_id}: Clicked on Detailed Extract button for back date {i} to download CSV")
                 new_file_name = f"{site_id}: EOD {back_date_value.strftime('%d.%m.%y')}.csv"
+
                 self._wait_for_file(download_dir, new_file_name)
+                logger.info(f"{site_id}: Downloaded and renamed file to: {new_file_name}")
 
                 self._click_element(driver, By.CSS_SELECTOR, f"#grd_Periods_ctl0{ctlvalue}_rpt_View_wbtn_View > .popupArrow")
                 self._click_element(driver, By.ID, f"grd_Periods_ctl0{ctlvalue}_rpt_View_wbtn_PDF")
+                logger.info(f"{site_id}: Clicked on View and PDF buttons for back date {i} to download PDF")
+
                 self._wait_for_file(download_dir)
                 logger.info(f"{site_id}: Downloaded EOD {back_date_value} pdf")
 
@@ -695,27 +742,36 @@ class PmsExtract(SeleniumExtract):
 
     @SeleniumExtract.retry(WebDriverException)
     def _generate_avai_report(self, driver: WebDriver, site_id: str, download_dir: Path):
-        """Downloads the full-year Availability report as CSV."""
+        """Generate Availability report by downloading 'Availability' as csv."""
         logger.info(f"{site_id}: Generating availability report for site")
 
         driver.switch_to.default_content()
 
         self._click_element(driver, By.CSS_SELECTOR, 'button[aria-label="Menu"]')
+        logger.info(f"{site_id}: Clicked on dropdown menu")
+
         self._click_element(driver, By.XPATH, "//span[normalize-space()='Reservation']")
+        logger.info(f"{site_id}: Clicked on Reservation button")
+
         self._click_element(driver, By.XPATH, "//a[@href='RLXWebForms/rep/wfrm_rep_Availability.aspx']")
+        logger.info(f"{site_id}: Selected 'AV' option")
 
         WebDriverWait(driver, self.waittime).until(
             EC.invisibility_of_element_located((By.CLASS_NAME, "progress-indicator-background"))
         )
+
         WebDriverWait(driver, self.waittime).until(
             EC.frame_to_be_available_and_switch_to_it((By.ID, "MainFrame"))
         )
+        logger.info(f"{site_id}: Switched to report frame")
 
         self._enter_date(driver, By.ID, "ctl00_InputParameters_winp_StartDate", config.date_str['first_day_of_year'])
         self._enter_date(driver, By.ID, "ctl00_InputParameters_winp_EndDate", config.date_str['first_day_of_next_year'])
+        logger.info(f"{site_id}: Entered start and end dates")
 
         self._click_element(driver, By.CSS_SELECTOR, "span.popupArrow")
         self._click_element(driver, By.ID, "ctl00_ReportsView_wbtn_CSV")
+        logger.info(f"{site_id}: Clicked on export button to download CSV")
 
         new_file_name = f"{site_id} Availability {config.dates['as_of_date'].strftime('%Y')}.csv"
         self._wait_for_file(download_dir, new_file_name)
@@ -723,67 +779,75 @@ class PmsExtract(SeleniumExtract):
 
     @SeleniumExtract.retry(WebDriverException)
     def _generate_company_detail_report(self, driver: WebDriver, site_id: str, download_dir: Path):
-        """Downloads the Company Detail report as PDF (Bedroom / Nett / Forecast type)."""
+        """Generate Company Detail report by downloading 'Company' report as pdf."""
         logger.info(f"{site_id}: Generating company detail report for site")
 
         driver.switch_to.default_content()
 
         self._click_element(driver, By.CSS_SELECTOR, 'button[aria-label="Menu"]')
+        logger.info(f"{site_id}: Clicked on dropdown menu")
+
         self._click_element(driver, By.XPATH, "//span[text()='Revenue']")
+        logger.info(f"{site_id}: Clicked on Revenue button")
+
         self._click_element(driver, By.XPATH, "//a[@href='RLXWebforms/rep/wfrm_rep_Company.aspx']")
+        logger.info(f"{site_id}: Selected company report option")
 
         WebDriverWait(driver, self.waittime).until(
             EC.invisibility_of_element_located((By.CLASS_NAME, "progress-indicator-background"))
         )
+
         WebDriverWait(driver, self.waittime).until(
             EC.frame_to_be_available_and_switch_to_it((By.ID, "MainFrame"))
         )
+        logger.info(f"{site_id}: Switched to report frame")
 
         self._enter_date(driver, By.ID, "ctl00_InputParameters_winp_From", config.date_str['first_day_of_year'])
         self._enter_date(driver, By.ID, "ctl00_InputParameters_winp_To", config.date_str['last_day_of_year'])
+        logger.info(f"{site_id}: Entered From and To dates")
 
         def select_dropdown_option(dropdown_id, option_text):
             self._click_element(driver, By.ID, dropdown_id)
             self._click_element(driver, By.XPATH, f"//*[@id='{dropdown_id}']/option[. = '{option_text}']")
+            logger.info(f"{site_id}: Selected '{option_text}' in dropdown with ID '{dropdown_id}'")
 
         select_dropdown_option("ctl00_InputParameters_winp_BookingType", "Bedroom")
         select_dropdown_option("ctl00_InputParameters_winp_ShowAs", "Nett")
         select_dropdown_option("ctl00_InputParameters_winp_Type", "Forecast")
 
         self._click_element(driver, By.ID, "ctl00_InputParameters_winp_ShowDetailed")
+        logger.info(f"{site_id}: Included show details")
 
         dropdown_button_xpath = "//div[@id='ctl00_InputParameters_msd_Include_wdd_Property']//td[@mkr='Button']"
         self._click_element(driver, By.XPATH, dropdown_button_xpath)
         self._click_element(driver, By.LINK_TEXT, "Room Nights")
         self._click_element(driver, By.LINK_TEXT, "Accom Revenue")
         self._click_element(driver, By.LINK_TEXT, "ARR")
+        logger.info(f"{site_id}: Selected additional details: Room Nights, Accom Revenue, ARR")
 
         self._click_element(driver, By.ID, "ctl00_ReportsView_wbtn_View")
         time.sleep(1)
         self._click_element(driver, By.ID, "ctl00_ReportsView_wbtn_PDF")
+        logger.info(f"{site_id}: Clicked on View and PDF buttons to download report")
 
         self._wait_for_file(download_dir)
-        logger.info(f"{site_id}: Downloaded Company Detail report successfully.")
+        logger.info(f"{site_id}: Downloaded Company Detail reprot successfully.")
 
-    # --- SharePoint upload ---
+    # --- OS ---
     def _move_files(self, download_dir: Path, country: str, site_id: str):
-        """
-        Uploads all downloaded files to SharePoint via Graph API.
-        CSVs go into their respective report-type sub-folders under Report Data/;
-        PDFs are grouped into the monthly folder for the property.
-        """
+        """Upload downloaded files to SharePoint via Graph API."""
         logger.info(f"{site_id}: Starting move files to SharePoint.")
         sp_report_data = f"{config.credentials['sp_dor_root']}/Report Data"
-        upload_sp      = self._sp_upload()
+        upload_sp = self._sp_upload()
 
         file_types = {
-            f"{site_id} Actual"      : "Actual",
-            f"{site_id} Forecast"    : "Forecast",
+            f"{site_id} Actual": "Actual",
+            f"{site_id} Forecast": "Forecast",
             f"{site_id} Availability": "Availability",
-            f"{site_id} EOD"         : "EOD",
+            f"{site_id} EOD": "EOD"
         }
 
-        # Upload CSVs into typed sub-folders
+        ## --- CSVs ---
         for source_file in list(download_dir.iterdir()):
             if source_file.is_file() and source_file.suffix.lower() == '.csv':
                 sp_dest = None
@@ -798,12 +862,12 @@ class PmsExtract(SeleniumExtract):
                 else:
                     logger.info(f"{site_id}: Skipped '{source_file.name}' (no matching report type)")
 
-        # Upload remaining PDFs into the monthly folder
+        ## --- PDFs ---
         remaining = [f for f in download_dir.iterdir() if f.is_file()]
         if remaining:
-            month_number     = config.date_str['month_number']
-            month_name       = config.date_str['month_name']
-            year             = config.date_str['year']
+            month_number = config.date_str['month_number']
+            month_name   = config.date_str['month_name']
+            year         = config.date_str['year']
             month_year_folder = f"{month_number} {month_name} {year} ({site_id})"
             sp_pdf_dest = (
                 f"{config.credentials['sp_dor_root']}/{country}/{site_id}"
@@ -819,16 +883,14 @@ class PmsExtract(SeleniumExtract):
             logger.info(f"{site_id}: Local temp folder cleaned up.")
 
     def _skip_dates_copy(self, site_id: str, country: str):
-        """
-        When backdate > 1, copies the latest dated CSV forward to fill any missing date slots
-        directly on SharePoint. This handles the case where extract was skipped for prior days.
-        """
+        """Copy the latest dated CSV to fill missing backdate slots, directly on SharePoint."""
         logger.info(f"Checking if backdate > 1 for {site_id}, value: {self.backdate}")
         if self.backdate <= 1:
             logger.info(f"Skipping skip_dates_copy for {site_id}")
             return
 
-        sp_root         = config.credentials['sp_dor_root']
+        logger.info(f"Calling skip_dates_copy for {site_id}")
+        sp_root = config.credentials['sp_dor_root']
         folder_sp_paths = [
             f"{sp_root}/Report Data/{country}/{site_id}/{site_id} Actual",
             f"{sp_root}/Report Data/{country}/{site_id}/{site_id} Forecast",
@@ -836,7 +898,7 @@ class PmsExtract(SeleniumExtract):
 
         def process_folder(sp_folder_path: str):
             read_sp_client = ReadSP(self._token_manager.get_token(), self._sp_site_id)
-            csv_files      = read_sp_client.list_files_in_folder(sp_folder_path)
+            csv_files = read_sp_client.list_files_in_folder(sp_folder_path)
             if not csv_files:
                 logger.warning(f"No files found in: {sp_folder_path}")
                 return
@@ -856,6 +918,7 @@ class PmsExtract(SeleniumExtract):
                 logger.warning(f"No valid dated files in: {sp_folder_path}")
                 return
 
+            logger.info(f"Latest file: {latest_file['name']} ({latest_date.strftime('%d.%m.%y')})")
             content     = read_sp_client.get_file_content_by_id(latest_file['id'])
             file_prefix = " ".join(latest_file['name'].split(" ")[:-1])
             upload_sp   = self._sp_upload()
@@ -875,19 +938,14 @@ class PmsExtract(SeleniumExtract):
         for sp_path in folder_sp_paths:
             process_folder(sp_path)
 
-    # --- Main entry point ---
-    def run(self, country: str, site_id: str) -> tuple[str, str]:
-        """
-        Full extract pipeline for one site:
-        login → 8 report downloads → upload to SharePoint → cleanup.
-        A shared Chrome profile keeps the session alive so repeat logins
-        only trigger the TOTP prompt on the first site each run.
-        """
-        report_date_value  = config.dates['as_of_date'].strftime('%d.%m.%y')
-        folder_name        = f"{site_id} {report_date_value}"
+    # --- Main Processor Function ---
+    def run(self, country: str, site_id: str) -> tuple[str,str]:
+        """Automates the login and sequential downloading of multiple reports for a specific site."""
+        report_date_value = config.dates['as_of_date'].strftime('%d.%m.%y')
+        folder_name = f"{site_id} {report_date_value}"
         download_directory = config.paths['download_dir'] / folder_name
-        profile_dir        = self.profiles_dir / 'shared'
-        driver             = self.init_driver(download_directory, profile_dir)
+        profile_dir = self.profiles_dir / 'shared'
+        driver = self.init_driver(download_directory, profile_dir)
 
         try:
             self._login(driver, site_id)
@@ -901,7 +959,7 @@ class PmsExtract(SeleniumExtract):
             self._generate_cancellation_report(driver, site_id, download_directory)
             self._skip_dates_copy(site_id, country)
             self._move_files(download_directory, country, site_id)
-            logger.info(f"{site_id}: All report data retrieved successfully.")
+            logger.info(f"{site_id}: All report data retrived successfully.")
 
             return (site_id, "EXTRACT DATA SUCCESS")
 

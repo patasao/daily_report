@@ -17,7 +17,6 @@ import uuid
 logger = get_logger('refresh_excel_and_send', config.paths['log_dir'])
 _clipboard_lock = threading.Lock()
 
-
 class RefreshAndSend:
     """
     Handles opening, refreshing, saving, and emailing Excel-based DOR reports.
@@ -35,9 +34,9 @@ class RefreshAndSend:
             client_secret=config.credentials['client_secret'],
             scopes=config.credentials['scope']
         )
-        self._sp_site_id  = config.credentials['sp_site_id']
-        sp_email_path     = f"{config.credentials['sp_dor_root']}/Report Data/OTHER/dor_email_list.csv"
-        self.email_list   = self._read_sp().read_csv(sp_email_path)
+        self._sp_site_id = config.credentials['sp_site_id']
+        sp_email_path    = f"{config.credentials['sp_dor_root']}/Report Data/OTHER/dor_email_list.csv"
+        self.email_list  = self._read_sp().read_csv(sp_email_path)
 
     def _read_sp(self) -> ReadSP:
         return ReadSP(self._token_manager.get_token(), self._sp_site_id)
@@ -55,33 +54,32 @@ class RefreshAndSend:
         excel = win32.DispatchEx("Excel.Application")
         excel.DisplayAlerts = False
         if config.env_status == "test":
-            excel.Visible = True
-        else:
-            excel.Visible = False
+            excel.Visible = True #Deactivate run in background to inspect the automation movement
+        else: excel.Visible = False #Activate run in Background
         return excel
 
     @staticmethod
     def _get_dates(wb) -> dict:
-        """Extract the as-of date from the ReportConfig sheet and derive display strings."""
-        as_of = wb.Sheets("ReportConfig").Range("D1").Value
+        """Extract date values from the ReportConfig sheet."""
+        as_of = wb.Sheets("ReportConfig").Range("D1").Value 
         return {
-            'as_of'              : as_of,
-            'as_of_dot'          : as_of.strftime('%d.%m.%y'),
-            'first_day_of_month' : datetime(as_of.year, as_of.month, 1).strftime('%m/%d/%Y'),
-            'year'               : as_of.strftime('%Y'),
-            'month_number'       : as_of.strftime('%m'),
-            'month_name'         : as_of.strftime('%b'),
+            'as_of': as_of,
+            'as_of_dot': as_of.strftime('%d.%m.%y'),
+            'first_day_of_month': datetime(as_of.year, as_of.month, 1).strftime('%m/%d/%Y'),
+            'year': as_of.strftime('%Y'),
+            'month_number': as_of.strftime('%m'),
+            'month_name': as_of.strftime('%b')
         }
 
     @staticmethod
     def _set_default(wb, excel, dates: dict) -> None:
-        """Push the current as-of date into the filter/dropdown cells on each report sheet."""
+        """Push date values into the dropdown/filter cells on each sheet."""
         logger.info("Updating report dates.")
-        wb.Sheets("Pickup").Range("F2").Value           = dates['as_of']
-        wb.Sheets("Pickup").Range("I2").Value           = dates['first_day_of_month']
-        wb.Sheets("Variance").Range("D2").Value         = dates['first_day_of_month']
-        wb.Sheets("MarketSegments").Range("D2").Value   = dates['first_day_of_month']
-        wb.Sheets("Cancellations").Range("C2").Value    = dates['first_day_of_month']
+        wb.Sheets("Pickup").Range("F2").Value = dates['as_of']
+        wb.Sheets("Pickup").Range("I2").Value = dates['first_day_of_month']
+        wb.Sheets("Variance").Range("D2").Value = dates['first_day_of_month']
+        wb.Sheets("MarketSegments").Range("D2").Value = dates['first_day_of_month']
+        wb.Sheets("Cancellations").Range("C2").Value = dates['first_day_of_month']
         excel.CalculateUntilAsyncQueriesDone()
         wb.Sheets("DORSum").Activate()
         wb.Save()
@@ -89,9 +87,9 @@ class RefreshAndSend:
 
     @staticmethod
     def _snapshot(wb, sheet_name: str, cell_range: str, save_path: Path) -> Path:
-        """Captures an Excel range as a bitmap image via the clipboard and saves it to disk."""
-        with _clipboard_lock:
-            wb.Sheets(sheet_name).Range(cell_range).CopyPicture(Appearance=1, Format=2)
+        """Copy an Excel range as an image and save it to disk."""
+        with _clipboard_lock:  
+            wb.Sheets(sheet_name).Range(cell_range).CopyPicture(Appearance=1, Format=2) # 1=Screen, 2=Bitmap
             time.sleep(0.5)
             img = ImageGrab.grabclipboard()
             if img is None:
@@ -99,43 +97,31 @@ class RefreshAndSend:
             img.save(save_path)
 
     def _get_email_list(self, site_id: str) -> str:
-        """Look up the semicolon-separated recipient list for a given site from SharePoint."""
-        df         = self.email_list[self.email_list['site_id'] == site_id]
+        """Get email list to send"""
+        df = self.email_list[self.email_list['site_id'] == site_id]
         email_list = df['email'].dropna().astype(str).tolist()
         logger.info("%s: email list loaded (%d recipients)", site_id, len(email_list))
         return ";".join(email_list)
-
+    
     def _draft_email(self, wb, country: str, site_id: str, dates: dict) -> dict:
-        """
-        Composes the Graph API message payload.
-        Includes an inline PNG snapshot of the summary table (captured from Excel via
-        win32 + PIL) and deep links to the SharePoint report page and monthly folder.
-        SharePoint folder URL components are sourced from environment variables so no
-        internal domain or path is hard-coded.
-        """
-        as_of_dot    = dates["as_of_dot"]
-        year         = dates["year"]
+        """Compose the Graph API message payload with an inline table snapshot."""
+        as_of_dot = dates["as_of_dot"]
+        year = dates["year"]
         month_number = dates["month_number"]
-        month_name   = dates["month_name"]
+        month_name = dates["month_name"]
 
-        ws       = wb.Sheets("ReportConfig")
-        ht_name  = ws.Range("D6").Value
-        subject  = ws.Range("D8").Value
+        ws = wb.Sheets("ReportConfig")
+        ht_name = ws.Range("D6").Value
+        subject = ws.Range("D8").Value
         page_link = ws.Range("A103").Value
-
-        # Build the deep-link to the monthly report folder on SharePoint
-        # All domain/path components sourced from environment variables
-        sp_base_url       = config.credentials['sp_base_url']
-        sp_site_path      = config.credentials['sp_site_path']
-        sp_reports_folder = config.credentials['sp_reports_folder']
         folder_link = (
-            f"{sp_base_url}/:f:/r{sp_site_path}/Shared%20Documents"
-            f"/{sp_reports_folder}/{country}/{site_id}/{year}"
+            f"https://compasshospitalitycom.sharepoint.com/:f:/r/sites/DOR/Shared%20Documents"
+            f"/1_Namfon_DOR/{country}/{site_id}/{year}"
             f"/{month_number}%20{month_name}%20{year}%20({site_id})"
             f"/{site_id}%20{as_of_dot}?csf=1&web=1"
         )
 
-        # Capture the summary table as an inline image for the email body
+        # Capture inline table image
         temp_img = Path(os.environ.get("TEMP", ".")) / f"table_{site_id}_{uuid.uuid4().hex}.png"
         self._snapshot(wb, "ReportConfig", "C10:I24", temp_img)
         with open(temp_img, "rb") as f:
@@ -145,7 +131,6 @@ class RefreshAndSend:
             raw_recipients = config.e_mail['test_recipients']
         else:
             raw_recipients = self._get_email_list(site_id)
-
         recipients = [
             {"emailAddress": {"address": e.strip()}}
             for e in raw_recipients.split(";")
@@ -165,20 +150,20 @@ class RefreshAndSend:
         """
 
         return {
-            "ht_name"    : ht_name,
-            "page_link"  : page_link,
+            "ht_name": ht_name,
+            "page_link": page_link,
             "folder_link": folder_link,
             "message": {
-                "subject"     : subject,
-                "body"        : {"contentType": "HTML", "content": body},
+                "subject": subject,
+                "body": {"contentType": "HTML", "content": body},
                 "toRecipients": recipients,
-                "attachments" : [
+                "attachments": [
                     {
-                        "@odata.type" : "#microsoft.graph.fileAttachment",
-                        "name"        : "table.png",
+                        "@odata.type": "#microsoft.graph.fileAttachment",
+                        "name": "table.png",
                         "contentBytes": img_base64,
-                        "contentId"   : "table1",
-                        "isInline"    : True,
+                        "contentId": "table1",
+                        "isInline": True,
                     }
                 ],
             },
@@ -186,16 +171,16 @@ class RefreshAndSend:
         }
 
     def _data_files_check(self, country: str, site_id: str) -> bool:
-        """Verify required source files exist on SharePoint before opening Excel."""
+        """Check required source files exist on SharePoint before processing."""
         logger.info(f"{site_id}: Checking last update data")
 
         as_of        = config.dates['as_of_date']
         target_dates = [as_of - timedelta(days=1), as_of]
         date_strings = [d.strftime('%d.%m.%y') for d in target_dates]
         data_folder  = self.report_data_folder / country / site_id
-        cloud_pms_ids = {site[1] for site in config.group_ids['cloud_pms']}
+        mews_ids     = {site[1] for site in config.group_ids['mews']}
 
-        checks = [("Reservation Report", "Reservation report", "xlsx")] if site_id in cloud_pms_ids else [
+        checks = [("Reservation Report", "Reservation report", "xlsx")] if site_id in mews_ids else [
             ("EOD", "EOD", "csv"), ("Actual", "Actual", "csv"), ("Forecast", "Forecast", "csv")
         ]
 
@@ -220,7 +205,7 @@ class RefreshAndSend:
 
     # --- Core per-site logic ---
     def _save_file(self, wb, file_path: Path, country: str, site_id: str, dates: dict) -> bool:
-        """Saves a versioned copy of the workbook to a temp path, uploads to SharePoint, then cleans up."""
+        """Copy Excel to a temp path via SaveCopyAs, upload to SharePoint, then clean up."""
         try:
             logger.info(f"{site_id}: Saving Excel file...")
             month_year = f"{dates['month_number']} {dates['month_name']} {dates['year']}"
@@ -251,20 +236,16 @@ class RefreshAndSend:
             return False
 
     def _send_email(self, wb, country: str, site_id: str, dates: dict) -> None:
-        """
-        Builds the DOR email payload and dispatches it via Microsoft Graph API.
-        Guards against sending if the report's as-of date does not match yesterday,
-        which would indicate the data source was not updated correctly.
-        """
+        """Build and dispatch the DOR email, guarded by date/link conditions."""
         logger.info(f"{site_id}: Sending email..")
-        yesterday   = (datetime.today() - timedelta(days=1)).strftime("%d/%m/%Y")
+        yesterday = (datetime.today() - timedelta(days=1)).strftime("%d/%m/%Y")
         last_update = dates["as_of"].strftime("%d/%m/%Y")
 
         payload = self._draft_email(wb, country, site_id, dates)
 
         if last_update == yesterday and payload["folder_link"] and payload["page_link"]:
             Email().send(self.sender_email, {k: v for k, v in payload.items()
-                                             if k not in ("ht_name", "page_link", "folder_link")})
+                                           if k not in ("ht_name", "page_link", "folder_link")})
             logger.info(f"{site_id}: Email sent for %s at %s", site_id, datetime.now().strftime("%Y%m%d_%H%M%S"))
             logger.info("---")
         else:
@@ -273,13 +254,13 @@ class RefreshAndSend:
 
     def run(self, country: str, site_id: str) -> tuple[str, str]:
         """
-        Full pipeline for one site: check files → open Excel → refresh Power Query
-        connections → update date filters → save versioned copy → email via Graph API.
+        Full pipeline for one site: check files -> open Excel -> refresh ->
+        set dropdowns -> save -> email.
 
         Each call spawns its own Excel process (DispatchEx) so sites can
-        run concurrently without shared-state collisions.
+        run concurrently without collision.
         """
-        pythoncom.CoInitialize()
+        pythoncom.CoInitialize() 
 
         check = self._data_files_check(country, site_id)
         if not check:
@@ -296,7 +277,7 @@ class RefreshAndSend:
             return site_id, "Skipped (No DOR File)"
 
         excel = self._open_excel()
-        wb    = None
+        wb = None
         try:
             file_path = dor_files[0]
             logger.info("Processing: %s", file_path.name)
@@ -329,3 +310,7 @@ class RefreshAndSend:
             except Exception:
                 pass
             pythoncom.CoUninitialize()
+
+
+
+

@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from process.extract_data import PmsExtract
-from process.transform_data import MewsTrans, PmsTrans
+from process.extract_data import Guestline as GuestlineExtract
+from process.transform_data import MewsTrans, GuestlineTrans
 from process.refresh_excel_and_send import RefreshAndSend
 import config
 from services.logger import get_logger
@@ -14,8 +14,8 @@ MAX_RETRY = 2
 # Per-site runners
 # ---------------------------------------------------------------------------
 
-def _cloud_pms_transform_and_send(country: str, site_id: str) -> dict:
-    """Run transform → refresh&send for one cloud PMS site. Returns result dict."""
+def _mews_transform_and_send(country: str, site_id: str) -> dict:
+    """Run transform → refresh&send for one Mews site. Returns result dict."""
     result = {'site_id': site_id}
     _, transform_status = MewsTrans().run(country, site_id)
     result['transform'] = transform_status
@@ -24,9 +24,9 @@ def _cloud_pms_transform_and_send(country: str, site_id: str) -> dict:
     return result
 
 
-def _pms_transform_and_send(country: str, site_id: str) -> tuple[str, str]:
-    """Run transform → refresh&send for one on-premise PMS site (called after extract)."""
-    _, transform_status = PmsTrans().run(country, site_id)
+def _guestline_transform_and_send(country: str, site_id: str) -> tuple[str, str]:
+    """Run transform → refresh&send for one Guestline site (called after extract)."""
+    _, transform_status = GuestlineTrans().run(country, site_id)
     _, send_status = RefreshAndSend().run(country, site_id)
     return transform_status, send_status
 
@@ -43,13 +43,13 @@ def _is_failed(result: dict) -> bool:
 # Batch processors
 # ---------------------------------------------------------------------------
 
-def _process_cloud_pms(max_workers: int = 3) -> list[dict]:
-    """All cloud PMS sites: transform + refresh&send fully concurrent (no extract needed)."""
+def _process_mews(max_workers: int = 3) -> list[dict]:
+    """All Mews sites: transform + refresh&send fully concurrent (no extract needed)."""
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {
-            executor.submit(_cloud_pms_transform_and_send, country, site_id): (country, site_id)
-            for country, site_id in config.group_ids['cloud_pms']
+            executor.submit(_mews_transform_and_send, country, site_id): (country, site_id)
+            for country, site_id in config.group_ids['mews']
         }
         for future in as_completed(future_map):
             _, site_id = future_map[future]
@@ -66,10 +66,10 @@ def _process_cloud_pms(max_workers: int = 3) -> list[dict]:
     return results
 
 
-def _process_pms(max_workers: int = 3) -> list[dict]:
+def _process_guestline(max_workers: int = 3) -> list[dict]:
     """
-    On-premise PMS pipeline:
-      - extract runs sequentially (shared Chrome browser profile for session reuse)
+    Guestline pipeline:
+      - extract runs sequentially (shared Chrome profile)
       - immediately after each extract completes, submit transform+send to thread pool
       - multiple transform+send jobs run concurrently across sites
     """
@@ -77,10 +77,10 @@ def _process_pms(max_workers: int = 3) -> list[dict]:
     future_map: dict = {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for country, site_id in config.group_ids['pms']:
-            # --- Sequential extract (shared Chrome profile preserves login session) ---
+        for country, site_id in config.group_ids['guestline']:
+            # --- Sequential extract (shared Chrome profile) ---
             try:
-                _, extract_status = PmsExtract().run(country, site_id)
+                _, extract_status = GuestlineExtract().run(country, site_id)
             except Exception as e:
                 logger.error(f"{site_id}: Extract raised unexpected error - {e}")
                 extract_status = f"EXTRACT DATA FAILED - {e}"
@@ -92,8 +92,8 @@ def _process_pms(max_workers: int = 3) -> list[dict]:
                 'refresh_send': None,
             }
 
-            # --- Submit transform+send concurrently as soon as each extract completes ---
-            future = executor.submit(_pms_transform_and_send, country, site_id)
+            # --- Submit transform+send to thread pool immediately after extract ---
+            future = executor.submit(_guestline_transform_and_send, country, site_id)
             future_map[future] = site_id
 
         # Collect transform+send results as they complete
@@ -115,24 +115,25 @@ def _step_failed(status) -> bool:
     return bool(status and 'FAIL' in status.upper())
 
 
-def _retry_site(country: str, site_id: str, is_pms: bool, prev_result: dict) -> dict:
+def _retry_site(country: str, site_id: str, is_guestline: bool, prev_result: dict) -> dict:
     """Re-run only from the first failed step for one site."""
     result = dict(prev_result)
 
-    if is_pms:
+    if is_guestline:
         extract_failed   = _step_failed(prev_result.get('extract'))
         transform_failed = _step_failed(prev_result.get('transform'))
         send_failed      = _step_failed(prev_result.get('refresh_send'))
 
         if extract_failed:
+            # No step before extract — retry extract itself
             logger.info(f"{site_id}: retrying from extract")
             try:
-                _, extract_status = PmsExtract().run(country, site_id)
+                _, extract_status = GuestlineExtract().run(country, site_id)
             except Exception as e:
                 extract_status = f"EXTRACT DATA FAILED - {e}"
             result['extract'] = extract_status
             if not _step_failed(extract_status):
-                transform_status, send_status = _pms_transform_and_send(country, site_id)
+                transform_status, send_status = _guestline_transform_and_send(country, site_id)
                 result['transform'] = transform_status
                 result['refresh_send'] = send_status
 
@@ -140,33 +141,34 @@ def _retry_site(country: str, site_id: str, is_pms: bool, prev_result: dict) -> 
             # Retry from extract (step before transform)
             logger.info(f"{site_id}: transform failed — retrying from extract")
             try:
-                _, extract_status = PmsExtract().run(country, site_id)
+                _, extract_status = GuestlineExtract().run(country, site_id)
             except Exception as e:
                 extract_status = f"EXTRACT DATA FAILED - {e}"
             result['extract'] = extract_status
             if not _step_failed(extract_status):
-                transform_status, send_status = _pms_transform_and_send(country, site_id)
+                transform_status, send_status = _guestline_transform_and_send(country, site_id)
                 result['transform'] = transform_status
                 result['refresh_send'] = send_status
 
         elif send_failed:
             # Retry from transform (step before send)
             logger.info(f"{site_id}: refresh & send failed — retrying from transform")
-            transform_status, send_status = _pms_transform_and_send(country, site_id)
+            transform_status, send_status = _guestline_transform_and_send(country, site_id)
             result['transform'] = transform_status
             result['refresh_send'] = send_status
 
-    else:  # Cloud PMS
+    else:  # Mews
         transform_failed = _step_failed(prev_result.get('transform'))
         send_failed      = _step_failed(prev_result.get('refresh_send'))
 
         if transform_failed:
+            # No step before transform for Mews — retry transform (and send)
             logger.info(f"{site_id}: retrying from transform")
-            result = _cloud_pms_transform_and_send(country, site_id)
+            result = _mews_transform_and_send(country, site_id)
         elif send_failed:
             # Retry from transform (step before send)
             logger.info(f"{site_id}: refresh & send failed — retrying from transform")
-            result = _cloud_pms_transform_and_send(country, site_id)
+            result = _mews_transform_and_send(country, site_id)
 
     return result
 
@@ -186,7 +188,7 @@ def _cell_color(status) -> str:
 
 
 def _send_summary(results: list[dict]) -> None:
-    """Log and email an HTML summary table of all site pipeline statuses."""
+    """Log and email an HTML summary table."""
     print("\n=== SUMMARY REPORT ===")
     logger.info("=== SUMMARY REPORT ===")
 
@@ -248,17 +250,17 @@ def _send_summary(results: list[dict]) -> None:
 def main():
     all_results: dict[str, dict] = {}
 
-    cloud_pms_map = {site_id: country for country, site_id in config.group_ids['cloud_pms']}
-    pms_map       = {site_id: country for country, site_id in config.group_ids['pms']}
+    mews_map = {site_id: country for country, site_id in config.group_ids['mews']}
+    guestline_map = {site_id: country for country, site_id in config.group_ids['guestline']}
 
-    # --- Initial run: on-premise PMS first (sequential extract), then cloud PMS (fully parallel) ---
-    for result in _process_pms():
+    # --- Initial run ---
+    for result in _process_guestline():
         all_results[result['site_id']] = result
 
-    for result in _process_cloud_pms():
+    for result in _process_mews():
         all_results[result['site_id']] = result
 
-    # --- Retry failed sites sequentially, after all sites complete ---
+    # --- Retry failed sites (sequentially, after all sites done) ---
     for attempt in range(1, MAX_RETRY + 1):
         failed = [r for r in all_results.values() if _is_failed(r)]
         if not failed:
@@ -269,17 +271,17 @@ def main():
         print(f"\nRetrying {len(failed)} failed site(s): {failed_ids}")
 
         for r in failed:
-            site_id  = r['site_id']
-            is_pms   = site_id in pms_map
-            country  = pms_map.get(site_id) or cloud_pms_map.get(site_id)
-            all_results[site_id] = _retry_site(country, site_id, is_pms, r)
+            site_id = r['site_id']
+            is_guestline = site_id in guestline_map
+            country = guestline_map.get(site_id) or mews_map.get(site_id)
+            all_results[site_id] = _retry_site(country, site_id, is_guestline, r)
 
     # Preserve config order in summary output
     ordered = []
-    for _, site_id in config.group_ids['pms']:
+    for _, site_id in config.group_ids['guestline']:
         if site_id in all_results:
             ordered.append(all_results[site_id])
-    for _, site_id in config.group_ids['cloud_pms']:
+    for _, site_id in config.group_ids['mews']:
         if site_id in all_results:
             ordered.append(all_results[site_id])
 
