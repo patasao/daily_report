@@ -26,27 +26,23 @@ An end-to-end automated pipeline that extracts, transforms, and distributes **28
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                         main.py                              │
-│  ┌─────────────────────────┐  ┌─────────────────────────┐   │
-│  │  On-Premise PMS Pipeline │  │  Cloud PMS Pipeline      │   │
-│  │  (sequential extract,   │  │  (fully concurrent —     │   │
-│  │   concurrent transform) │  │   no extract step)       │   │
-│  └──────────┬──────────────┘  └──────────┬──────────────┘   │
-│             │                            │                    │
-│             ▼                            ▼                    │
-│  ┌──────────────────┐        ┌──────────────────────┐        │
-│  │  Extract         │        │  Transform           │        │
-│  │  (Selenium +     │        │  (Pandas / NumPy)    │        │
-│  │   TOTP 2FA)      │        └──────────────────────┘        │
-│  └──────────────────┘                   │                    │
-│             │                           ▼                    │
-│             ▼                 ┌──────────────────────┐       │
-│     SharePoint (Graph API)    │  Refresh & Send      │       │
-│     CSV / PDF upload          │  (win32com + Graph   │       │
-│                               │   API sendMail)      │       │
-│                               └──────────────────────┘       │
-└──────────────────────────────────────────────────────────────┘
+Guestline PMS ──Selenium──► CSV/PDF ──────────────────┐
+                                                       ▼
+                                           SharePoint (raw files)
+                                                       │
+Mews PMS ──── Excel on SharePoint ──────────────────► │
+                                                       ▼
+                                         transform_data.py (Pandas)
+                                                       │
+                                                       ▼
+                                    SharePoint /Report Data/ALL PY TRANS/
+                                                       │
+                                                       ▼
+                                    refresh_excel_and_send.py (win32com)
+                                                       │
+                                              ┌────────┴────────┐
+                                              ▼                  ▼
+                                     Excel on SharePoint   Email (Graph API)
 ```
 
 ---
