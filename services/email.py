@@ -50,7 +50,7 @@ class Email:
                 return False
 
 # # --- Example message template (can add or remove elements) ---
-# raw_recipients = "user@example.com; user2@example.com"
+# Recipients are loaded from local configuration.
 # recipients = [
 #     {"emailAddress": {"address": email.strip()}}
 #     for email in raw_recipients.split(";")

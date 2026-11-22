@@ -1,0 +1,23 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Runtime artifacts
+log/
+*.log
+__pycache__/
+*.py[cod]
+*.png
+*.xlsm
+*.xlsx
+*.pdf
+*.crdownload
+
+# Local exports and credentials
+report_data/
+downloads/
+state/
+.pms_profiles/
+.venv/
+venv/
